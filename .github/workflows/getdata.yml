@@ -1,0 +1,177 @@
+name: 获取数据
+
+# 手动触发
+on:
+  workflow_dispatch:
+    inputs:
+      duration_seconds:
+        description: '运行时长（秒）'
+        required: false
+        default: '10800'   # 3*60*60 = 3 小时
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  getdata:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: adetaildata
+          # 让数据库容器使用上海时区（postgres 未显式配置 timezone 时会读取 TZ）
+          TZ: Asia/Shanghai
+          PGTZ: Asia/Shanghai
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d adetaildata"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      PG_USER: postgres
+      PG_PASSWORD: postgres
+      PG_HOST: 127.0.0.1
+      PG_PORT: "5432"
+      PG_DBNAME: adetaildata
+      # 整个 job 的所有步骤（shell、go run、psql/pg_dump）统一使用上海时区
+      TZ: Asia/Shanghai
+      PGTZ: Asia/Shanghai      # psql / pg_dump 客户端时区
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/checkout@v7
+        with:
+          repository: '1299172402/adetaildata'
+          path: 'adetaildata'
+          token: ${{ secrets.ADETAILDATA_PAT }}
+
+      - uses: actions/checkout@v7
+        with:
+          repository: '1299172402/getadata-conf'
+          path: 'getadata-conf'
+          token: ${{ secrets.ADETAILDATA_PAT }}
+          sparse-checkout: |
+            codes.txt
+            iptdx-on-github.txt
+            schema.sql
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.4'
+          cache-dependency-path: 'adetaildata/go.mod'
+
+      - name: install pgclient & zip
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-client zip
+
+      # 建表：执行仓库里的 schema.sql（可重复运行）
+      - name: init database schema
+        run: |
+          psql "postgres://$PG_USER:$PG_PASSWORD@$PG_HOST:$PG_PORT/$PG_DBNAME" -v ON_ERROR_STOP=1 -f getadata-conf/schema.sql
+          psql "postgres://$PG_USER:$PG_PASSWORD@$PG_HOST:$PG_PORT/$PG_DBNAME" -c '\d "quote"'
+
+      - name: build adetaildata
+        working-directory: adetaildata
+        run: |
+          go build -o ./build/adetaildata ./cmd/app
+
+      # timeout 参数说明：
+      #   --signal=INT        到点先发 SIGINT，让程序走优雅退出（收尾/落库）
+      #   --kill-after=60s    INT 后 60s 还没退，补一发 SIGKILL，防止卡死
+      #   退出码 124/130 都属于正常收尾，故用 || echo 兜住，不阻断后续导出步骤
+      - name: get data
+        env:
+          # 手动触发时 duration_seconds 有值（默认 10800）；schedule / push 触发时为空
+          INPUT_SEC: ${{ github.event.inputs.duration_seconds }}
+        run: |
+          MAX=10800                        # 兜底上限 3 小时
+          NOW=$(date +%s)
+          if [ -n "$INPUT_SEC" ]; then
+            REMAIN=$INPUT_SEC
+            echo "手动触发：当前北京时间 $(date '+%F %T')，将于 $(date -d "@$(( NOW + REMAIN ))" '+%F %T') 发送 SIGINT（运行 ${REMAIN} 秒）"
+          else
+            REMAIN=$MAX;
+          fi
+          echo "本次将运行 ${REMAIN} 秒后发送 SIGINT"
+          timeout --signal=INT --kill-after=60s "${REMAIN}s" \
+            ./adetaildata/build/adetaildata -ipfile getadata-conf/iptdx-on-github.txt -codefile getadata-conf/codes.txt \
+            || echo "已达停止时刻，已发送 SIGINT 停止"
+
+      - name: get time stamp
+        id: time
+        run: |
+          # 以时间戳为后缀,例如 quote_data_20260922_152341.sql
+          # job 已设 TZ=Asia/Shanghai,所以这里是北京时间
+          STAMP=$(date +%Y%m%d_%H%M%S)
+          # 记录时间戳,后续步骤可通过 ${{ env.STAMP }} 使用
+          echo "STAMP=$STAMP" >> "$GITHUB_ENV"
+
+      # ------------------------------------------------------------------
+      # 导出数据库：生成"增量可导入"的 SQL 文件
+      #   --data-only                只导数据，不导建表语句
+      #   --column-inserts           每条 INSERT 都带列名，列顺序变了也不会错位
+      #   --on-conflict-do-nothing   主键冲突就跳过 => 重复导入不会报错、不会覆盖
+      #   --no-owner / --no-privileges 去掉角色权限，本地换用户名也能导入
+      # ------------------------------------------------------------------
+      - name: export data
+        run: |
+          mkdir -p export
+          SQL_NAME="quote_data_${{ env.STAMP }}"
+          pg_dump "postgres://$PG_USER:$PG_PASSWORD@$PG_HOST:$PG_PORT/$PG_DBNAME" \
+            --data-only \
+            --column-inserts \
+            --on-conflict-do-nothing \
+            --no-owner \
+            --no-privileges \
+            --table='public."quote"' \
+            -f "export/${SQL_NAME}.sql"
+          echo "导出行数: $(grep -c 'INSERT INTO' "export/${SQL_NAME}.sql" || true)"
+
+          zip -j "export/${SQL_NAME}.zip" "export/${SQL_NAME}.sql"
+          echo "已打包: export/${SQL_NAME}.zip"
+          ls -lh export/
+
+      - name: upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: quote_data_${{ env.STAMP }}
+          path: export/quote_data_${{ env.STAMP }}.sql
+
+      - name: update last_time.txt
+        env:
+          STAMP: ${{ env.STAMP }}
+        run: |
+          echo "$STAMP" > last_time.txt
+          cat last_time.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add last_time.txt
+          git commit -m "chore: 更新数据时间至 $STAMP" || echo "无需提交"
+          git push
+
+      - name: publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STAMP: ${{ env.STAMP }}
+        run: |
+          TAG="$STAMP"
+          gh release create "$TAG" export/quote_data_$STAMP.zip \
+            --title "$STAMP" \
+            --notes "update time: $STAMP" \
+            --latest
+
+      - name: upload to lanzou
+        uses: 1299172402/lanzou-release@main
+        with:
+          phpdisk_info: ${{ secrets.LANZOU_PHPDISK_INFO }}
+          folder_id: ${{ secrets.LANZOU_FOLDER_ID }}
+          file_path: 'export/*.zip'
