@@ -14,7 +14,29 @@ permissions:
   contents: write
 
 jobs:
+  # 启动前检查：当前北京时间日期若命中跳过列表，则整个 getdata job 不执行
+  check_date:
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: check skip dates
+        id: check
+        run: |
+          TODAY=$(TZ=Asia/Shanghai date +%Y%m%d)
+          echo "当前北京时间日期: $TODAY"
+          if [ -f skip_dates.txt ] && tr -d '\r' < skip_dates.txt | tr -s '[:space:]' '\n' | grep -qx "$TODAY"; then
+            echo "命中跳过日期($TODAY)，本次跳过后续执行"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
   getdata:
+    needs: check_date
+    if: needs.check_date.outputs.skip != 'true'
     runs-on: ubuntu-latest
 
     services:
