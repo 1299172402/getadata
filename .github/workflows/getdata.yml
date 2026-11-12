@@ -128,7 +128,7 @@ jobs:
           LOG="log.log"
           timeout --signal=INT --kill-after=60s "${REMAIN}s" \
             stdbuf -oL -eL ./adetaildata/build/adetaildata -ipfile getadata-conf/iptdx-on-github.txt -codefile getadata-conf/codes.txt \
-            > "$LOG" 2>&1 || echo "已达停止时刻，已发送 SIGINT 停止" >> "$LOG"
+            > "$LOG" 2>&1 || echo "已达停止时刻，已发送 SIGINT 停止"
 
       - name: get time stamp
         id: time
