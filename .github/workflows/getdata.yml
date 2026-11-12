@@ -115,7 +115,7 @@ jobs:
           # 手动触发时 duration_seconds 有值（默认 10800）；schedule / push 触发时为空
           INPUT_SEC: ${{ github.event.inputs.duration_seconds }}
         run: |
-          MAX=10800                        # 兜底上限 3 小时
+          MAX=10800                        # 未指定运行时长时，设置为 3 小时
           NOW=$(date +%s)
           if [ -n "$INPUT_SEC" ]; then
             REMAIN=$INPUT_SEC
