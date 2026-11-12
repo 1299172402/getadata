@@ -124,9 +124,11 @@ jobs:
             REMAIN=$MAX;
           fi
           echo "本次将运行 ${REMAIN} 秒后发送 SIGINT"
+          
+          LOG="log.log"
           timeout --signal=INT --kill-after=60s "${REMAIN}s" \
-            ./adetaildata/build/adetaildata -ipfile getadata-conf/iptdx-on-github.txt -codefile getadata-conf/codes.txt \
-            || echo "已达停止时刻，已发送 SIGINT 停止"
+            stdbuf -oL -eL ./adetaildata/build/adetaildata -ipfile getadata-conf/iptdx-on-github.txt -codefile getadata-conf/codes.txt \
+            > "$LOG" 2>&1 || echo "已达停止时刻，已发送 SIGINT 停止" >> "$LOG"
 
       - name: get time stamp
         id: time
@@ -161,12 +163,28 @@ jobs:
           zip -j "export/${SQL_NAME}.zip" "export/${SQL_NAME}.sql"
           echo "已打包: export/${SQL_NAME}.zip"
           ls -lh export/
+      
+      - name: export log
+        run: |
+          LOG_NAME="log_${{ env.STAMP }}"
+          mv log.log "export/${LOG_NAME}.log"
+          zip -j "export/${LOG_NAME}.zip" "export/${LOG_NAME}.log"
+          echo "已打包: export/${LOG_NAME}.zip"
+          ls -lh export/
 
-      - name: upload artifact
+      - name: upload data artifact
         uses: actions/upload-artifact@v7
         with:
           name: quote_data_${{ env.STAMP }}
-          path: export/quote_data_${{ env.STAMP }}.sql
+          path: export/quote_data_${{ env.STAMP }}.zip
+          archive: false
+
+      - name: upload log artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: log_${{ env.STAMP }}
+          path: export/log_${{ env.STAMP }}.zip
+          archive: false
 
       - name: checkout release repo
         uses: actions/checkout@v7
@@ -196,7 +214,9 @@ jobs:
           STAMP: ${{ env.STAMP }}
         run: |
           TAG="$STAMP"
-          gh release create "$TAG" "export/quote_data_$STAMP.zip" \
+          gh release create "$TAG" \
+            "export/quote_data_$STAMP.zip" \
+            "export/log_$STAMP.zip" \
             --repo 1299172402/getadata-release \
             --target "${{ steps.release_commit.outputs.sha }}" \
             --title "$STAMP" \
