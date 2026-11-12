@@ -168,7 +168,16 @@ jobs:
           name: quote_data_${{ env.STAMP }}
           path: export/quote_data_${{ env.STAMP }}.sql
 
-      - name: update last_time.txt
+      - name: checkout release repo
+        uses: actions/checkout@v7
+        with:
+          repository: 1299172402/getadata-release
+          path: release-repo
+          token: ${{ secrets.RELEASE_REPO_PAT }}
+
+      - name: update last_time.txt in release repo
+        id: release_commit
+        working-directory: release-repo
         env:
           STAMP: ${{ env.STAMP }}
         run: |
@@ -179,14 +188,17 @@ jobs:
           git add last_time.txt
           git commit -m "chore: 更新数据时间至 $STAMP" || echo "无需提交"
           git push
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: publish release
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_REPO_PAT }}
           STAMP: ${{ env.STAMP }}
         run: |
           TAG="$STAMP"
-          gh release create "$TAG" export/quote_data_$STAMP.zip \
+          gh release create "$TAG" "export/quote_data_$STAMP.zip" \
+            --repo 1299172402/getadata-release \
+            --target "${{ steps.release_commit.outputs.sha }}" \
             --title "$STAMP" \
             --notes "update time: $STAMP" \
             --latest
